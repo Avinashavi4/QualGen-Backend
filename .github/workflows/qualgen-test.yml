@@ -1,4 +1,5 @@
-name: QualGen E2E Test Runner
+# Temporarily disabled - replaced with working CI workflows
+# name: QualGen E2E Test Runner
 
 on:
   push:

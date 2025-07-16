@@ -1,0 +1,105 @@
+name: AppWright Test Challenge Example
+
+on: 
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm install
+        
+      - name: Build project
+        run: npm run build
+        
+      - name: Install qgjob CLI
+        run: |
+          npm run build:cli
+          npm link
+          
+      - name: Start Mock QualGen Server
+        run: |
+          # Start the test server in background
+          node test-server-enhanced.js &
+          echo $! > server.pid
+          
+          # Wait for server to be ready
+          for i in {1..20}; do
+            if curl -f http://localhost:3001/health 2>/dev/null; then
+              echo "✅ QualGen server is ready!"
+              break
+            fi
+            echo "⏳ Waiting for server... (attempt $i/20)"
+            sleep 3
+          done
+          
+      - name: Submit test job
+        run: |
+          echo "🚀 Submitting AppWright test job..."
+          
+          # Submit the exact job from challenge example
+          JOB_ID=$(qgjob submit \
+            --org-id="qualgent" \
+            --app-version-id="xxz123" \
+            --test-path="./tests/appwright/e2e/onboarding.spec.js" \
+            --priority=5 \
+            --target="emulator" \
+            --server-url="http://localhost:3001")
+            
+          echo "📝 Job submitted with ID: $JOB_ID"
+          
+          # Extract job ID for status checking
+          EXTRACTED_JOB_ID=$(echo "$JOB_ID" | grep -o 'job-[a-f0-9-]*' | head -1)
+          echo "EXTRACTED_JOB_ID=$EXTRACTED_JOB_ID" >> $GITHUB_ENV
+          
+      - name: Poll for completion
+        timeout-minutes: 5
+        run: |
+          echo "⏳ Polling for job completion..."
+          
+          for i in {1..60}; do
+            STATUS=$(qgjob status --job-id="$EXTRACTED_JOB_ID" --server-url="http://localhost:3001")
+            echo "📊 Status check $i: $STATUS"
+            
+            # Check if job completed
+            if echo "$STATUS" | grep -q "completed\|finished\|success"; then
+              echo "✅ Job completed successfully!"
+              exit 0
+            elif echo "$STATUS" | grep -q "failed\|error"; then
+              echo "❌ Job failed!"
+              exit 1
+            fi
+            
+            sleep 5
+          done
+          
+          echo "⏰ Job did not complete within timeout"
+          exit 1
+          
+      - name: Show final job list
+        if: always()
+        run: |
+          echo "📋 Final job listing:"
+          qgjob list --org-id="qualgent" --server-url="http://localhost:3001" || true
+          
+      - name: Cleanup
+        if: always()
+        run: |
+          # Stop the server
+          if [ -f server.pid ]; then
+            kill $(cat server.pid) 2>/dev/null || true
+            rm server.pid
+          fi

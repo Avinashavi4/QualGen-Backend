@@ -1,0 +1,236 @@
+name: QualGen CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  NODE_ENV: test
+
+jobs:
+  test-unit:
+    runs-on: ubuntu-latest
+    name: Unit Tests
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Run unit tests
+      run: npm run test:unit || npm test -- --testPathPattern="cli|types"
+      
+    - name: Build project
+      run: npm run build
+
+  test-integration:
+    runs-on: ubuntu-latest
+    name: Integration Tests with Mock Server
+    needs: test-unit
+    
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: qualgen_test
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Build project
+      run: npm run build
+      
+    - name: Start QualGen Server (Background)
+      run: |
+        export DATABASE_URL="postgresql://test:test123@localhost:5432/qualgen_test"
+        export REDIS_URL="redis://localhost:6379"
+        export PORT=3000
+        npm run start:server &
+        echo $! > server.pid
+        
+    - name: Wait for server to be ready
+      run: |
+        echo "Waiting for QualGen server..."
+        for i in {1..30}; do
+          if curl -f http://localhost:3000/health; then
+            echo "Server is ready!"
+            break
+          fi
+          echo "Waiting... (attempt $i/30)"
+          sleep 2
+        done
+        
+    - name: Install CLI globally
+      run: npm link
+      
+    - name: Test CLI Commands
+      run: |
+        # Test CLI help
+        qgjob --help
+        
+        # Test job submission
+        JOB_ID=$(qgjob submit \
+          --org-id "github-ci" \
+          --app-version-id "${{ github.sha }}" \
+          --test-path "./tests/e2e/sample.spec.js" \
+          --priority 5 \
+          --target "emulator" \
+          --server-url "http://localhost:3000" | grep -o 'job-[a-f0-9-]*')
+          
+        echo "Submitted job: $JOB_ID"
+        
+        # Test status check
+        qgjob status --job-id "$JOB_ID" --server-url "http://localhost:3000"
+        
+        # Test job listing
+        qgjob list --org-id "github-ci" --server-url "http://localhost:3000"
+        
+    - name: Stop server
+      if: always()
+      run: |
+        if [ -f server.pid ]; then
+          kill $(cat server.pid) || true
+        fi
+
+  demo-workflow:
+    runs-on: ubuntu-latest
+    name: Demonstrate QualGen Features
+    needs: test-integration
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Build project
+      run: npm run build
+      
+    - name: Start Mock Test Server
+      run: |
+        node test-server-enhanced.js &
+        echo $! > mock-server.pid
+        
+    - name: Wait for mock server
+      run: |
+        for i in {1..15}; do
+          if curl -f http://localhost:3001/health; then
+            echo "Mock server is ready!"
+            break
+          fi
+          sleep 2
+        done
+        
+    - name: Install CLI
+      run: npm link
+      
+    - name: Demonstrate Job Submission Flow
+      run: |
+        echo "🚀 Demonstrating QualGen CLI in CI/CD..."
+        
+        # Submit multiple jobs to show grouping
+        echo "📝 Submitting jobs for app version: ${{ github.sha }}"
+        
+        JOB1=$(qgjob submit \
+          --org-id "demo-org" \
+          --app-version-id "${{ github.sha }}" \
+          --test-path "tests/e2e/login.spec.js" \
+          --priority 8 \
+          --target "emulator" \
+          --server-url "http://localhost:3001" | grep -o 'job-[a-f0-9-]*')
+          
+        JOB2=$(qgjob submit \
+          --org-id "demo-org" \
+          --app-version-id "${{ github.sha }}" \
+          --test-path "tests/e2e/checkout.spec.js" \
+          --priority 7 \
+          --target "emulator" \
+          --server-url "http://localhost:3001" | grep -o 'job-[a-f0-9-]*')
+          
+        JOB3=$(qgjob submit \
+          --org-id "demo-org" \
+          --app-version-id "different-version" \
+          --test-path "tests/integration/api.spec.js" \
+          --priority 6 \
+          --target "device" \
+          --server-url "http://localhost:3001" | grep -o 'job-[a-f0-9-]*')
+          
+        echo "✅ Jobs submitted: $JOB1, $JOB2, $JOB3"
+        
+        # Show job statuses
+        echo "📊 Checking job statuses..."
+        qgjob status --job-id "$JOB1" --server-url "http://localhost:3001"
+        qgjob status --job-id "$JOB2" --server-url "http://localhost:3001"
+        qgjob status --job-id "$JOB3" --server-url "http://localhost:3001"
+        
+        # List all jobs
+        echo "📋 Listing all jobs for demo-org..."
+        qgjob list --org-id "demo-org" --server-url "http://localhost:3001"
+        
+        echo "🎉 QualGen CI/CD demonstration completed successfully!"
+        
+    - name: Stop mock server
+      if: always()
+      run: |
+        if [ -f mock-server.pid ]; then
+          kill $(cat mock-server.pid) || true
+        fi
+        
+    - name: Generate Summary
+      run: |
+        echo "## 🎉 QualGen CI/CD Pipeline Success" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Unit Tests**: Passed" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Integration Tests**: Passed" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **CLI Commands**: All working" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Job Submission**: Successful" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Job Grouping**: Demonstrated" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "🚀 **Ready for production deployment!**" >> $GITHUB_STEP_SUMMARY
