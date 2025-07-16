@@ -1,0 +1,46 @@
+# Multi-stage build for test agents
+FROM node:18-alpine AS base
+
+# Install dependencies for building native modules
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY tsconfig*.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy source code
+COPY src/ ./src/
+
+# Build the application
+RUN npm run build
+
+# Production stage
+FROM node:18-alpine AS production
+
+# Install curl for health checks and other tools needed for testing
+RUN apk add --no-cache curl
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install only production dependencies
+RUN npm ci --only=production && npm cache clean --force
+
+# Copy built application
+COPY --from=base /app/dist ./dist
+
+# Copy example test files
+COPY tests/ ./tests/
+
+# Create non-root user
+USER node
+
+# Default command - this will be overridden by specific agent implementations
+CMD ["node", "dist/agents/index.js"]

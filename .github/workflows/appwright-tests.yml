@@ -1,0 +1,270 @@
+name: Run AppWright Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      test_suite:
+        description: 'Test suite to run'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - smoke
+        - regression
+        - performance
+
+env:
+  QGJOB_SERVER_URL: ${{ secrets.QGJOB_SERVER_URL || 'http://localhost:3000' }}
+
+jobs:
+  submit-tests:
+    runs-on: ubuntu-latest
+    outputs:
+      emulator-job-id: ${{ steps.submit-emulator.outputs.job_id }}
+      device-job-id: ${{ steps.submit-device.outputs.job_id }}
+      browserstack-job-id: ${{ steps.submit-browserstack.outputs.job_id }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and install CLI
+        run: |
+          npm run build:cli
+          npm link
+
+      - name: Submit Emulator Tests
+        id: submit-emulator
+        run: |
+          echo "Submitting emulator tests..."
+          JOB_OUTPUT=$(qgjob submit \
+            --org-id "${{ github.repository_owner }}" \
+            --app-version-id "${{ github.sha }}" \
+            --test-path "./tests/appwright/smoke/**/*.spec.js" \
+            --priority 8 \
+            --target emulator \
+            --server-url "${{ env.QGJOB_SERVER_URL }}" \
+            --metadata '{"suite": "smoke", "environment": "ci", "branch": "${{ github.ref_name }}"}')
+          
+          JOB_ID=$(echo "$JOB_OUTPUT" | grep "Job ID:" | awk '{print $3}')
+          echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+          echo "Emulator job submitted: $JOB_ID"
+
+      - name: Submit Device Tests
+        id: submit-device
+        if: github.event_name == 'push' || github.event.inputs.test_suite == 'all'
+        run: |
+          echo "Submitting device tests..."
+          JOB_OUTPUT=$(qgjob submit \
+            --org-id "${{ github.repository_owner }}" \
+            --app-version-id "${{ github.sha }}" \
+            --test-path "./tests/appwright/integration/**/*.spec.js" \
+            --priority 6 \
+            --target device \
+            --server-url "${{ env.QGJOB_SERVER_URL }}" \
+            --metadata '{"suite": "integration", "environment": "ci", "branch": "${{ github.ref_name }}"}')
+          
+          JOB_ID=$(echo "$JOB_OUTPUT" | grep "Job ID:" | awk '{print $3}')
+          echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+          echo "Device job submitted: $JOB_ID"
+
+      - name: Submit BrowserStack Tests
+        id: submit-browserstack
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "Submitting BrowserStack tests..."
+          JOB_OUTPUT=$(qgjob submit \
+            --org-id "${{ github.repository_owner }}" \
+            --app-version-id "${{ github.sha }}" \
+            --test-path "./tests/appwright/e2e/**/*.spec.js" \
+            --priority 5 \
+            --target browserstack \
+            --server-url "${{ env.QGJOB_SERVER_URL }}" \
+            --metadata '{"suite": "e2e", "environment": "ci", "branch": "${{ github.ref_name }}"}')
+          
+          JOB_ID=$(echo "$JOB_OUTPUT" | grep "Job ID:" | awk '{print $3}')
+          echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+          echo "BrowserStack job submitted: $JOB_ID"
+
+  wait-for-completion:
+    runs-on: ubuntu-latest
+    needs: submit-tests
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and install CLI
+        run: |
+          npm run build:cli
+          npm link
+
+      - name: Wait for Emulator Tests
+        if: needs.submit-tests.outputs.emulator-job-id != ''
+        run: |
+          echo "Waiting for emulator tests to complete..."
+          qgjob status \
+            --job-id "${{ needs.submit-tests.outputs.emulator-job-id }}" \
+            --server-url "${{ env.QGJOB_SERVER_URL }}" \
+            --watch \
+            --interval 10
+
+      - name: Wait for Device Tests
+        if: needs.submit-tests.outputs.device-job-id != ''
+        run: |
+          echo "Waiting for device tests to complete..."
+          qgjob status \
+            --job-id "${{ needs.submit-tests.outputs.device-job-id }}" \
+            --server-url "${{ env.QGJOB_SERVER_URL }}" \
+            --watch \
+            --interval 10
+
+      - name: Wait for BrowserStack Tests
+        if: needs.submit-tests.outputs.browserstack-job-id != ''
+        run: |
+          echo "Waiting for BrowserStack tests to complete..."
+          qgjob status \
+            --job-id "${{ needs.submit-tests.outputs.browserstack-job-id }}" \
+            --server-url "${{ env.QGJOB_SERVER_URL }}" \
+            --watch \
+            --interval 10
+
+  check-results:
+    runs-on: ubuntu-latest
+    needs: [submit-tests, wait-for-completion]
+    if: always()
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and install CLI
+        run: |
+          npm run build:cli
+          npm link
+
+      - name: Check Emulator Test Results
+        id: emulator-results
+        if: needs.submit-tests.outputs.emulator-job-id != ''
+        run: |
+          echo "Checking emulator test results..."
+          qgjob status \
+            --job-id "${{ needs.submit-tests.outputs.emulator-job-id }}" \
+            --server-url "${{ env.QGJOB_SERVER_URL }}"
+          
+          # Extract job status for decision making
+          STATUS=$(qgjob status --job-id "${{ needs.submit-tests.outputs.emulator-job-id }}" --server-url "${{ env.QGJOB_SERVER_URL }}" | grep "Status:" | awk '{print $2}')
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+
+      - name: Check Device Test Results
+        id: device-results
+        if: needs.submit-tests.outputs.device-job-id != ''
+        run: |
+          echo "Checking device test results..."
+          qgjob status \
+            --job-id "${{ needs.submit-tests.outputs.device-job-id }}" \
+            --server-url "${{ env.QGJOB_SERVER_URL }}"
+          
+          STATUS=$(qgjob status --job-id "${{ needs.submit-tests.outputs.device-job-id }}" --server-url "${{ env.QGJOB_SERVER_URL }}" | grep "Status:" | awk '{print $2}')
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+
+      - name: Check BrowserStack Test Results
+        id: browserstack-results
+        if: needs.submit-tests.outputs.browserstack-job-id != ''
+        run: |
+          echo "Checking BrowserStack test results..."
+          qgjob status \
+            --job-id "${{ needs.submit-tests.outputs.browserstack-job-id }}" \
+            --server-url "${{ env.QGJOB_SERVER_URL }}"
+          
+          STATUS=$(qgjob status --job-id "${{ needs.submit-tests.outputs.browserstack-job-id }}" --server-url "${{ env.QGJOB_SERVER_URL }}" | grep "Status:" | awk '{print $2}')
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+
+      - name: Fail if any tests failed
+        if: |
+          (steps.emulator-results.outputs.status == 'failed') ||
+          (steps.device-results.outputs.status == 'failed') ||
+          (steps.browserstack-results.outputs.status == 'failed')
+        run: |
+          echo "❌ One or more test suites failed!"
+          echo "Emulator: ${{ steps.emulator-results.outputs.status }}"
+          echo "Device: ${{ steps.device-results.outputs.status }}"
+          echo "BrowserStack: ${{ steps.browserstack-results.outputs.status }}"
+          exit 1
+
+      - name: Success summary
+        if: |
+          (steps.emulator-results.outputs.status != 'failed') &&
+          (steps.device-results.outputs.status != 'failed') &&
+          (steps.browserstack-results.outputs.status != 'failed')
+        run: |
+          echo "✅ All test suites completed successfully!"
+          echo "Emulator: ${{ steps.emulator-results.outputs.status }}"
+          echo "Device: ${{ steps.device-results.outputs.status }}"
+          echo "BrowserStack: ${{ steps.browserstack-results.outputs.status }}"
+
+  report:
+    runs-on: ubuntu-latest
+    needs: [submit-tests, check-results]
+    if: always()
+    
+    steps:
+      - name: Generate Test Report
+        run: |
+          echo "# AppWright Test Results 📋" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | Job ID | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "${{ needs.submit-tests.outputs.emulator-job-id }}" ]; then
+            echo "| Emulator | \`${{ needs.submit-tests.outputs.emulator-job-id }}\` | ${{ needs.check-results.outputs.emulator-status || 'Unknown' }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ -n "${{ needs.submit-tests.outputs.device-job-id }}" ]; then
+            echo "| Device | \`${{ needs.submit-tests.outputs.device-job-id }}\` | ${{ needs.check-results.outputs.device-status || 'Unknown' }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ -n "${{ needs.submit-tests.outputs.browserstack-job-id }}" ]; then
+            echo "| BrowserStack | \`${{ needs.submit-tests.outputs.browserstack-job-id }}\` | ${{ needs.check-results.outputs.browserstack-status || 'Unknown' }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Job Details" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Organization**: \`${{ github.repository_owner }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Server**: \`${{ env.QGJOB_SERVER_URL }}\`" >> $GITHUB_STEP_SUMMARY

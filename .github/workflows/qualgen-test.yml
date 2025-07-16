@@ -1,0 +1,121 @@
+name: QualGen E2E Test Runner
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  QGJOB_SERVER_URL: ${{ secrets.QGJOB_SERVER_URL || 'http://localhost:3000' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        target: [emulator, device, browserstack]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Build project
+      run: npm run build
+      
+    - name: Wait for QualGen server
+      run: |
+        echo "Waiting for QualGen server..."
+        timeout 30 bash -c 'until curl -f $QGJOB_SERVER_URL/health; do sleep 2; done'
+        
+    - name: Submit test job
+      id: submit_job
+      run: |
+        JOB_OUTPUT=$(npx qgjob submit \
+          --org-id "github-actions" \
+          --app-version-id "${{ github.sha }}" \
+          --test-path "./tests/e2e" \
+          --priority 8 \
+          --target "${{ matrix.target }}" \
+          --wait \
+          --timeout 1800)
+        
+        echo "job_output<<EOF" >> $GITHUB_OUTPUT
+        echo "$JOB_OUTPUT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        
+        # Extract job ID for status checking
+        JOB_ID=$(echo "$JOB_OUTPUT" | grep -o 'Job ID: [^[:space:]]*' | cut -d' ' -f3)
+        echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+        
+    - name: Poll job status
+      if: steps.submit_job.outputs.job_id
+      run: |
+        JOB_ID="${{ steps.submit_job.outputs.job_id }}"
+        echo "Polling job status for: $JOB_ID"
+        
+        # Poll every 10 seconds for up to 30 minutes
+        for i in {1..180}; do
+          STATUS=$(npx qgjob status --job-id "$JOB_ID" --format json | jq -r '.status')
+          echo "Job status: $STATUS (check $i/180)"
+          
+          case $STATUS in
+            "completed")
+              echo "✅ Job completed successfully!"
+              npx qgjob status --job-id "$JOB_ID"
+              exit 0
+              ;;
+            "failed"|"cancelled")
+              echo "❌ Job failed or was cancelled"
+              npx qgjob status --job-id "$JOB_ID"
+              exit 1
+              ;;
+            "pending"|"running")
+              sleep 10
+              continue
+              ;;
+            *)
+              echo "Unknown status: $STATUS"
+              sleep 10
+              continue
+              ;;
+          esac
+        done
+        
+        echo "❌ Timeout: Job did not complete within 30 minutes"
+        npx qgjob status --job-id "$JOB_ID"
+        exit 1
+        
+    - name: Get test results
+      if: always() && steps.submit_job.outputs.job_id
+      run: |
+        echo "Final job status:"
+        npx qgjob status --job-id "${{ steps.submit_job.outputs.job_id }}"
+        
+    - name: Cancel job on failure
+      if: failure() && steps.submit_job.outputs.job_id
+      run: |
+        echo "Cancelling job due to workflow failure..."
+        npx qgjob cancel --job-id "${{ steps.submit_job.outputs.job_id }}" --reason "GitHub Actions workflow failed"
+
+  # Deploy job for successful tests
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Deploy application
+      run: |
+        echo "🚀 Deploying application after successful tests..."
+        echo "All test targets (emulator, device, browserstack) passed!"
