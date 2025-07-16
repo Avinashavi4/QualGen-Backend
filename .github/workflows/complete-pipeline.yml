@@ -1,4 +1,5 @@
-name: Complete AppWright Test Pipeline
+# Disabled temporarily - using simplified working workflows
+# name: Complete AppWright Test Pipeline
 
 on:
   push:

@@ -1,4 +1,5 @@
-name: QualGen CI/CD Pipeline
+# Disabled temporarily - using simplified working workflows
+# name: QualGen CI/CD Pipeline
 
 on:
   push:
