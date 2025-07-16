@@ -74,8 +74,8 @@ QualGen/
 ### Quick Setup
 ```bash
 # Clone and install
-git clone <repository-url>
-cd QualGen
+git clone https://github.com/Avinashavi4/QualGen-Backend.git
+cd QualGen-Backend
 npm install
 
 # Build the project
