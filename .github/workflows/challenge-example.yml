@@ -1,0 +1,66 @@
+name: AppWright Test
+on: [push]
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          
+      - name: Install dependencies
+        run: npm install
+        
+      - name: Build and install qgjob CLI
+        run: |
+          npm run build:cli
+          npm link
+          
+      - name: Submit AppWright test
+        id: submit_test
+        run: |
+          # Submit test job using qgjob CLI
+          JOB_OUTPUT=$(qgjob submit \
+            --org-id=qualgent \
+            --app-version-id=xxz123 \
+            --test=tests/onboarding.spec.js \
+            --target=emulator \
+            --priority=5)
+          
+          echo "$JOB_OUTPUT"
+          
+          # Extract job ID for status checking
+          JOB_ID=$(echo "$JOB_OUTPUT" | grep -o 'Job ID: [a-zA-Z0-9-]*' | cut -d' ' -f3)
+          echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+          
+      - name: Poll for completion
+        run: |
+          JOB_ID="${{ steps.submit_test.outputs.job_id }}"
+          echo "Polling job status for: $JOB_ID"
+          
+          # Poll every 10 seconds for up to 10 minutes
+          for i in {1..60}; do
+            STATUS_OUTPUT=$(qgjob status --job-id "$JOB_ID")
+            STATUS=$(echo "$STATUS_OUTPUT" | grep "Status:" | cut -d' ' -f2)
+            
+            echo "Job status: $STATUS (check $i/60)"
+            
+            if [ "$STATUS" = "completed" ]; then
+              echo "✅ Test completed successfully!"
+              echo "$STATUS_OUTPUT"
+              exit 0
+            elif [ "$STATUS" = "failed" ]; then
+              echo "❌ Test failed!"
+              echo "$STATUS_OUTPUT"
+              exit 1
+            fi
+            
+            sleep 10
+          done
+          
+          echo "❌ Timeout waiting for test completion"
+          exit 1

@@ -1,0 +1,121 @@
+name: AppWright Test Submission Demo
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  QGJOB_SERVER_URL: ${{ secrets.QGJOB_SERVER_URL || 'http://localhost:3000' }}
+
+jobs:
+  submit-tests:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Build QualGen CLI
+      run: |
+        npm run build:cli
+        npm link
+        
+    - name: Verify CLI installation
+      run: |
+        qgjob --version
+        qgjob --help
+        
+    - name: Submit AppWright tests
+      id: submit
+      run: |
+        echo "🚀 Submitting AppWright tests to QualGen..."
+        
+        # Submit test job using qgjob CLI
+        JOB_OUTPUT=$(qgjob submit \
+          --org-id "${{ github.repository_owner }}" \
+          --app-version-id "${{ github.sha }}" \
+          --test-path "tests/appwright/e2e/user-journey.spec.js" \
+          --priority 5 \
+          --target "emulator" \
+          --server-url "$QGJOB_SERVER_URL")
+        
+        echo "📝 Job submission result:"
+        echo "$JOB_OUTPUT"
+        
+        # Extract job ID for polling
+        JOB_ID=$(echo "$JOB_OUTPUT" | grep -o 'Job ID: [a-zA-Z0-9-]*' | cut -d' ' -f3)
+        echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+        echo "✅ Submitted job: $JOB_ID"
+        
+    - name: Poll for completion
+      if: steps.submit.outputs.job_id
+      run: |
+        JOB_ID="${{ steps.submit.outputs.job_id }}"
+        echo "⏳ Polling job status: $JOB_ID"
+        
+        # Poll every 15 seconds for up to 20 minutes
+        MAX_ATTEMPTS=80
+        ATTEMPT=1
+        
+        while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+          echo "📊 Status check $ATTEMPT/$MAX_ATTEMPTS"
+          
+          STATUS_OUTPUT=$(qgjob status --job-id "$JOB_ID")
+          STATUS=$(echo "$STATUS_OUTPUT" | grep "Status:" | cut -d' ' -f2)
+          
+          echo "Current status: $STATUS"
+          
+          case $STATUS in
+            "completed")
+              echo "✅ Tests completed successfully!"
+              echo "$STATUS_OUTPUT"
+              exit 0
+              ;;
+            "failed")
+              echo "❌ Tests failed!"
+              echo "$STATUS_OUTPUT"
+              exit 1
+              ;;
+            "cancelled")
+              echo "⚠️ Tests were cancelled!"
+              echo "$STATUS_OUTPUT"
+              exit 1
+              ;;
+            "pending"|"running")
+              echo "⏳ Tests still running, waiting..."
+              ;;
+            *)
+              echo "⚠️ Unknown status: $STATUS"
+              ;;
+          esac
+          
+          sleep 15
+          ATTEMPT=$((ATTEMPT + 1))
+        done
+        
+        echo "❌ Timeout: Tests did not complete within 20 minutes"
+        qgjob status --job-id "$JOB_ID"
+        exit 1
+        
+    - name: Show final results
+      if: always() && steps.submit.outputs.job_id
+      run: |
+        echo "📋 Final test results:"
+        qgjob status --job-id "${{ steps.submit.outputs.job_id }}" --verbose
+        
+    - name: List all jobs (debug)
+      if: always()
+      run: |
+        echo "📊 All jobs for this org:"
+        qgjob list --org-id "${{ github.repository_owner }}" --limit 10

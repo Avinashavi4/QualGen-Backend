@@ -1,0 +1,180 @@
+name: Complete AppWright Test Pipeline
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  schedule:
+    # Run nightly tests at 2 AM UTC
+    - cron: '0 2 * * *'
+
+env:
+  QGJOB_SERVER_URL: ${{ secrets.QGJOB_SERVER_URL || 'http://localhost:3000' }}
+  ORG_ID: ${{ github.repository_owner }}
+  APP_VERSION: ${{ github.sha }}
+
+jobs:
+  # Job 1: Submit tests for different targets
+  submit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [emulator, device, browserstack]
+        test-suite: [smoke, integration, e2e]
+        
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install and build
+      run: |
+        npm ci
+        npm run build
+        npm link
+        
+    - name: Submit ${{ matrix.test-suite }} tests to ${{ matrix.target }}
+      id: submit
+      run: |
+        echo "🚀 Submitting ${{ matrix.test-suite }} tests to ${{ matrix.target }}"
+        
+        # Set priority based on test type
+        case "${{ matrix.test-suite }}" in
+          "smoke") PRIORITY=9 ;;
+          "integration") PRIORITY=7 ;;
+          "e2e") PRIORITY=5 ;;
+        esac
+        
+        # Submit job
+        OUTPUT=$(qgjob submit \
+          --org-id "$ORG_ID" \
+          --app-version-id "$APP_VERSION" \
+          --test-path "tests/appwright/${{ matrix.test-suite }}/" \
+          --priority $PRIORITY \
+          --target "${{ matrix.target }}" \
+          --server-url "$QGJOB_SERVER_URL" \
+          --tags "ci,github-actions,${{ matrix.test-suite }}")
+        
+        echo "$OUTPUT"
+        
+        # Extract and save job ID
+        JOB_ID=$(echo "$OUTPUT" | grep -o 'Job ID: [a-zA-Z0-9-]*' | cut -d' ' -f3)
+        echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+        echo "JOB_ID_${{ matrix.target }}_${{ matrix.test-suite }}=$JOB_ID" >> $GITHUB_ENV
+        
+    outputs:
+      job_id: ${{ steps.submit.outputs.job_id }}
+
+  # Job 2: Monitor all submitted jobs
+  monitor-tests:
+    needs: submit-tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js and CLI
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    - run: |
+        npm ci
+        npm run build
+        npm link
+        
+    - name: Monitor all test jobs
+      run: |
+        echo "📊 Monitoring all jobs for app version: $APP_VERSION"
+        
+        # List all jobs for this app version
+        qgjob list \
+          --org-id "$ORG_ID" \
+          --app-version-id "$APP_VERSION" \
+          --format table
+          
+        echo "⏳ Waiting for all jobs to complete..."
+        
+        # Wait for all jobs to complete (up to 30 minutes)
+        timeout 1800 bash -c '
+          while true; do
+            PENDING=$(qgjob list --org-id "$ORG_ID" --app-version-id "$APP_VERSION" --status pending,running --format json | jq length)
+            if [ "$PENDING" -eq 0 ]; then
+              echo "✅ All jobs completed!"
+              break
+            fi
+            echo "⏳ $PENDING jobs still running..."
+            sleep 30
+          done
+        '
+        
+    - name: Generate test report
+      run: |
+        echo "📋 Final Test Report"
+        echo "==================="
+        
+        # Get all jobs for this version
+        qgjob list \
+          --org-id "$ORG_ID" \
+          --app-version-id "$APP_VERSION" \
+          --format table
+          
+        # Check if any jobs failed
+        FAILED_JOBS=$(qgjob list --org-id "$ORG_ID" --app-version-id "$APP_VERSION" --status failed --format json | jq length)
+        
+        if [ "$FAILED_JOBS" -gt 0 ]; then
+          echo "❌ $FAILED_JOBS job(s) failed!"
+          qgjob list --org-id "$ORG_ID" --app-version-id "$APP_VERSION" --status failed --format table
+          exit 1
+        else
+          echo "✅ All jobs completed successfully!"
+        fi
+
+  # Job 3: Cleanup and notifications
+  cleanup:
+    needs: [submit-tests, monitor-tests]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup CLI
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    - run: |
+        npm ci
+        npm run build
+        npm link
+        
+    - name: Cancel any stuck jobs
+      if: failure()
+      run: |
+        echo "🧹 Cleaning up any stuck jobs..."
+        
+        # Cancel any pending/running jobs for this app version
+        STUCK_JOBS=$(qgjob list --org-id "$ORG_ID" --app-version-id "$APP_VERSION" --status pending,running --format json | jq -r '.[].id')
+        
+        for job_id in $STUCK_JOBS; do
+          echo "Cancelling stuck job: $job_id"
+          qgjob cancel --job-id "$job_id" --reason "GitHub Actions workflow cleanup"
+        done
+        
+    - name: Archive test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: qualgen-test-results-${{ github.sha }}
+        path: |
+          logs/
+          *.log
+        retention-days: 30
