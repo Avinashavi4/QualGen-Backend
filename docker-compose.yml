@@ -62,6 +62,49 @@ services:
       timeout: 10s
       retries: 5
 
+  # QualGen Job Orchestrator
+  job-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    ports:
+      - "8080:8080"  # REST API
+      - "50051:50051"  # gRPC
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      GRPC_PORT: 50051
+      DATABASE_URL: postgresql://qualgen:qualgen123@postgres:5432/qualgen
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # QualGen Dashboard
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    ports:
+      - "3007:3007"
+    environment:
+      NODE_ENV: production
+      API_URL: http://job-orchestrator:8080
+    depends_on:
+      - job-orchestrator
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3007/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # Example Test Agent (Emulator)
   test-agent-emulator:
     build:

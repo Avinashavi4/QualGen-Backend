@@ -1,0 +1,193 @@
+syntax = "proto3";
+
+package qualgen;
+
+// Job Orchestrator Service Definition
+service JobService {
+    // Device Management
+    rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+    rpc PollForJobs(PollForJobsRequest) returns (PollForJobsResponse);
+    rpc UpdateJobStatus(UpdateJobStatusRequest) returns (UpdateJobStatusResponse);
+    
+    // Job Management
+    rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
+    rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusResponse);
+    rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+    rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+    
+    // Real-time streaming
+    rpc StreamJobUpdates(StreamJobUpdatesRequest) returns (stream JobUpdate);
+    rpc StreamDeviceStatus(StreamDeviceStatusRequest) returns (stream DeviceStatus);
+}
+
+// Device Registration
+message RegisterDeviceRequest {
+    string device_id = 1;
+    string device_type = 2; // device, emulator, browserstack
+    string platform = 3; // android, ios
+    string capabilities = 4; // JSON string
+    string status = 5; // available, busy, offline
+}
+
+message RegisterDeviceResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Device Heartbeat
+message HeartbeatRequest {
+    string device_id = 1;
+    string status = 2;
+    int32 active_jobs = 3;
+    string system_info = 4; // JSON string
+}
+
+message HeartbeatResponse {
+    bool success = 1;
+    string message = 2;
+    repeated string commands = 3; // Commands for the device
+}
+
+// Job Polling
+message PollForJobsRequest {
+    string device_id = 1;
+    int32 max_jobs = 2;
+}
+
+message PollForJobsResponse {
+    repeated Job jobs = 1;
+}
+
+// Job Status Update
+message UpdateJobStatusRequest {
+    string job_id = 1;
+    string status = 2; // queued, running, completed, failed, cancelled
+    string message = 3;
+    string extra_data = 4; // JSON string for test results, artifacts, etc.
+}
+
+message UpdateJobStatusResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Job Submission
+message SubmitJobRequest {
+    string org_id = 1;
+    string app_version_id = 2;
+    string test_path = 3;
+    string platform = 4; // android, ios
+    string target = 5; // device, emulator, browserstack
+    string priority = 6; // low, normal, high, urgent
+    int32 timeout = 7; // seconds
+    string app_url = 8;
+    string extra_config = 9; // JSON string
+}
+
+message SubmitJobResponse {
+    bool success = 1;
+    string job_id = 2;
+    string message = 3;
+}
+
+// Job Status Query
+message GetJobStatusRequest {
+    string job_id = 1;
+}
+
+message GetJobStatusResponse {
+    Job job = 1;
+}
+
+// Job Cancellation
+message CancelJobRequest {
+    string job_id = 1;
+    string reason = 2;
+}
+
+message CancelJobResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Job Listing
+message ListJobsRequest {
+    string org_id = 1;
+    string app_version_id = 2;
+    string status = 3; // Filter by status
+    int32 limit = 4;
+    int32 offset = 5;
+}
+
+message ListJobsResponse {
+    repeated Job jobs = 1;
+    int32 total_count = 2;
+}
+
+// Streaming
+message StreamJobUpdatesRequest {
+    string org_id = 1;
+    repeated string job_ids = 2; // Empty for all jobs
+}
+
+message StreamDeviceStatusRequest {
+    repeated string device_ids = 1; // Empty for all devices
+}
+
+// Core Data Types
+message Job {
+    string job_id = 1;
+    string org_id = 2;
+    string app_version_id = 3;
+    string test_path = 4;
+    string platform = 5;
+    string target = 6;
+    string priority = 7;
+    string status = 8;
+    string device_id = 9;
+    string app_url = 10;
+    string extra_config = 11;
+    string created_at = 12;
+    string started_at = 13;
+    string completed_at = 14;
+    int32 timeout = 15;
+    string error_message = 16;
+    string test_results = 17; // JSON string
+    string artifacts = 18; // JSON string
+}
+
+message JobUpdate {
+    string job_id = 1;
+    string status = 2;
+    string message = 3;
+    string timestamp = 4;
+    string extra_data = 5; // JSON string
+}
+
+message DeviceStatus {
+    string device_id = 1;
+    string device_type = 2;
+    string platform = 3;
+    string status = 4;
+    int32 active_jobs = 5;
+    string capabilities = 6; // JSON string
+    string system_info = 7; // JSON string
+    string last_seen = 8;
+}
+
+// Health Check
+message HealthCheckRequest {
+    string service = 1;
+}
+
+message HealthCheckResponse {
+    enum ServingStatus {
+        UNKNOWN = 0;
+        SERVING = 1;
+        NOT_SERVING = 2;
+        SERVICE_UNKNOWN = 3;
+    }
+    ServingStatus status = 1;
+    string message = 2;
+}

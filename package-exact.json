@@ -1,0 +1,18 @@
+{
+  "name": "exact-browserstack-clone",
+  "version": "1.0.0",
+  "description": "EXACT replica of BrowserStack App Automate interface with all details from user's image",
+  "main": "exact-browserstack-clone.js",
+  "scripts": {
+    "start": "node exact-browserstack-clone.js",
+    "dev": "node exact-browserstack-clone.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "uuid": "^9.0.0"
+  },
+  "keywords": ["browserstack", "app-automate", "testing", "mobile", "android", "pixel"],
+  "author": "QualGen",
+  "license": "MIT"
+}

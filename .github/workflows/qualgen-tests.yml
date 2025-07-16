@@ -1,0 +1,212 @@
+name: QualGen Mobile Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  QUALGEN_API_URL: ${{ secrets.QUALGEN_API_URL || 'http://localhost:8080' }}
+  QUALGEN_API_KEY: ${{ secrets.QUALGEN_API_KEY }}
+
+jobs:
+  qualgen-tests:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        target: [device, emulator, browserstack]
+        test-suite: [smoke, regression, e2e]
+      fail-fast: false
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: |
+        npm install
+        chmod +x ./qgjob.js
+        
+    - name: Build app (if needed)
+      run: |
+        # Build your mobile app here
+        echo "Building mobile app..."
+        # npm run build:android
+        # npm run build:ios
+        
+    - name: Submit QualGen Test Jobs
+      id: submit-tests
+      run: |
+        echo "Submitting tests for ${{ matrix.target }} - ${{ matrix.test-suite }}"
+        
+        # Submit test job using CLI
+        JOB_OUTPUT=$(./qgjob.js submit \
+          --org-id "${{ github.repository_owner }}" \
+          --app-version-id "${{ github.sha }}" \
+          --test-path "./tests/${{ matrix.test-suite }}" \
+          --target "${{ matrix.target }}" \
+          --priority "high" \
+          --platform "android" \
+          --timeout 600)
+        
+        # Extract job ID from output
+        JOB_ID=$(echo "$JOB_OUTPUT" | grep "Job ID:" | awk '{print $3}')
+        echo "job-id=$JOB_ID" >> $GITHUB_OUTPUT
+        echo "✅ Submitted job: $JOB_ID"
+        
+    - name: Wait for test completion
+      id: wait-tests
+      run: |
+        echo "Waiting for job ${{ steps.submit-tests.outputs.job-id }} to complete..."
+        
+        # Wait for job completion with timeout
+        ./qgjob.js wait \
+          --job-id "${{ steps.submit-tests.outputs.job-id }}" \
+          --timeout 900
+          
+    - name: Get test results
+      if: always()
+      run: |
+        echo "Fetching final test results..."
+        ./qgjob.js status --job-id "${{ steps.submit-tests.outputs.job-id }}"
+        
+    - name: Download test artifacts (if available)
+      if: always()
+      run: |
+        # Download test videos, screenshots, logs
+        mkdir -p artifacts/${{ matrix.target }}/${{ matrix.test-suite }}
+        
+        # This would typically download from your artifact storage
+        echo "Downloading test artifacts for job ${{ steps.submit-tests.outputs.job-id }}"
+        
+    - name: Upload test artifacts
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-results-${{ matrix.target }}-${{ matrix.test-suite }}
+        path: artifacts/
+        retention-days: 30
+        
+    - name: Post results to PR (if PR)
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const jobId = '${{ steps.submit-tests.outputs.job-id }}';
+          const target = '${{ matrix.target }}';
+          const testSuite = '${{ matrix.test-suite }}';
+          
+          // Get job status via API
+          const response = await fetch(`${process.env.QUALGEN_API_URL}/api/v1/jobs/${jobId}`);
+          const job = await response.json();
+          
+          let status = '✅ PASSED';
+          if (job.status === 'failed') {
+            status = '❌ FAILED';
+          } else if (job.status === 'cancelled') {
+            status = '⚠️ CANCELLED';
+          }
+          
+          const comment = `## QualGen Test Results
+          
+          **Target:** ${target}  
+          **Test Suite:** ${testSuite}  
+          **Status:** ${status}  
+          **Duration:** ${job.started_at && job.completed_at ? 
+            Math.round((new Date(job.completed_at) - new Date(job.started_at)) / 1000) + 's' : 'N/A'}  
+          **Device:** ${job.device_id || 'N/A'}  
+          
+          ${job.test_results ? `
+          **Test Results:**
+          - Total: ${job.test_results.total || 0}
+          - Passed: ${job.test_results.passed || 0} ✅
+          - Failed: ${job.test_results.failed || 0} ❌
+          - Skipped: ${job.test_results.skipped || 0} ⏭️
+          ` : ''}
+          
+          **Job ID:** \`${jobId}\`  
+          **View Details:** [QualGen Dashboard](http://localhost:3007/builds/${job.job_id})
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+
+  # Aggregate results from all test matrix jobs
+  aggregate-results:
+    needs: qualgen-tests
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        
+    - name: Install dependencies
+      run: |
+        npm install
+        chmod +x ./qgjob.js
+        
+    - name: Generate test report
+      run: |
+        echo "# QualGen Test Summary" > test-summary.md
+        echo "" >> test-summary.md
+        echo "**Repository:** ${{ github.repository }}" >> test-summary.md
+        echo "**Commit:** ${{ github.sha }}" >> test-summary.md
+        echo "**Branch:** ${{ github.ref_name }}" >> test-summary.md
+        echo "**Triggered by:** ${{ github.event_name }}" >> test-summary.md
+        echo "" >> test-summary.md
+        
+        # List all jobs for this org and app version
+        ./qgjob.js list \
+          --org-id "${{ github.repository_owner }}" \
+          --limit 20 >> test-summary.md
+          
+    - name: Upload test summary
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-summary
+        path: test-summary.md
+        
+    - name: Check overall test status
+      run: |
+        # This step will fail the workflow if any critical tests failed
+        if [ "${{ needs.qualgen-tests.result }}" != "success" ]; then
+          echo "❌ Some QualGen tests failed!"
+          exit 1
+        else
+          echo "✅ All QualGen tests passed!"
+        fi
+
+  # Optional: Deploy if all tests pass
+  deploy:
+    needs: [qualgen-tests, aggregate-results]
+    runs-on: ubuntu-latest
+    if: success() && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Deploy to staging
+      run: |
+        echo "🚀 Deploying to staging environment..."
+        # Add your deployment logic here
+        
+    - name: Notify deployment
+      run: |
+        echo "✅ Deployment completed successfully!"
+        # Add Slack/email notifications here
